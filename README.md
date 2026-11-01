@@ -1,6 +1,6 @@
 # DriftDocket
 
-[![CI](https://github.com/MadanMohan0537/driftdocket/actions/workflows/ci.yml/badge.svg)](https://github.com/MadanMohan0537/driftdocket/actions/workflows/ci.yml)
+[![CI](https://github.com/MadanMohan0537/model-drift-retraining-decisions/actions/workflows/ci.yml/badge.svg)](https://github.com/MadanMohan0537/model-drift-retraining-decisions/actions/workflows/ci.yml)
 
 DriftDocket turns model drift into an auditable decision: it measures what moved, separates early warnings from confirmed performance decay, estimates retraining cost, and drafts an evidence-backed ticket.
 
@@ -20,7 +20,9 @@ Feature drift is cheap to detect and easy to overreact to. Labels often arrive l
 - Ticket body with evidence, rationale, plan signal, and compute/engineering cost
 - Twelve-month JSON report and detection-lead-time metric
 - **P1 delayed-label attribution:** incomplete cohorts cannot trigger a performance ticket
-- 21 focused tests and Python 3.11–3.13 CI
+- **P1 false-alarm budgeting:** deterministic moving-block bootstrap calibration over historical stable windows
+- Joint monthly PSI/KS alarm budget with reference binding and held-out verification
+- 28 focused tests and Python 3.11–3.13 CI
 
 No credentials, paid APIs, downloaded models, or network calls are required.
 
@@ -48,6 +50,10 @@ Feature movement can precede accuracy decay, creating measurable lead time witho
 
 The fixture introduces large prediction error while only one-third of outcomes are mature. The naive available-label view is unstable; DriftDocket returns `WAIT_FOR_LABELS` and opens no retraining ticket. Once a sufficiently large mature cohort exhibits the same deterioration, it opens a ticket. The acceptance rule is fixed before evaluation: zero performance tickets below 30 mature labels.
 
+## False-alarm experiment
+
+The monitor calibrates against 60 synthetic stable historical windows using deterministic moving blocks, a 10% monthly family alarm budget, and separate PSI/KS tails. On 200 independently generated held-out stable windows, 19 trigger a warning—a 9.5% rate—while the seeded behavior shift remains detectable. The first row-resampling attempt produced a 62.5% held-out rate and was rejected; only the corrected historical-window design is shipped.
+
 ## Architecture
 
 ```text
@@ -57,8 +63,9 @@ monthly Batch -> PSI/KS findings -> maturity gate -> MAE policy -> Decision
 
 ## Evidence boundaries
 
-This is a portfolio-scale decision engine, not production monitoring. The dataset is deterministic and synthetic, probable causes are ranked correlations rather than causal proof, PSI binning is reference-based, KS has no p-value correction, and ticket publication is deliberately represented as Markdown instead of mutating an external issue tracker. Production use needs durable storage, data contracts, authentication, multiple-testing control, real cost telemetry, and monitoring for outcome-dependent label delay. See [method and limitations](docs/METHOD.md) and [feature backlog](docs/BACKLOG.md).
+This is a portfolio-scale decision engine, not production monitoring. The dataset is deterministic and synthetic, probable causes are ranked correlations rather than causal proof, and ticket publication is deliberately represented as Markdown instead of mutating an external issue tracker. Bootstrap thresholds depend on representative stable history and are not formal guarantees under future nonstationarity. Production use needs durable storage, data contracts, authentication, real cost telemetry, and monitoring for outcome-dependent label delay. See [method and limitations](docs/METHOD.md), [feature backlog](docs/BACKLOG.md), and [rotation progress](docs/PROGRESS.md).
 
 ## License
 
 MIT
+

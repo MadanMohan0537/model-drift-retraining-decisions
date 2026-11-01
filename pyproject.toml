@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "driftdocket"
-version = "0.1.0"
-description = "Evidence-backed drift monitoring and retraining decisions"
+version = "0.2.0"
+description = "Evidence-backed drift decisions with delayed-label and false-alarm controls"
 requires-python = ">=3.11"
 
 [project.scripts]
@@ -13,3 +13,4 @@ driftdocket = "driftdocket.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["driftdocket*"]
+

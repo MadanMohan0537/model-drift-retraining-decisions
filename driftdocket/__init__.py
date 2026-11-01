@@ -1,4 +1,7 @@
 """DriftDocket public API."""
-from .monitor import Batch, DriftMonitor, TicketPolicy
+from .monitor import AlarmBudget, Batch, DriftMonitor, TicketPolicy, calibrate_false_alarm_budget
 
-__all__ = ["Batch", "DriftMonitor", "TicketPolicy"]
+__version__ = "0.2.0"
+
+__all__ = ["AlarmBudget", "Batch", "DriftMonitor", "TicketPolicy", "calibrate_false_alarm_budget"]
+

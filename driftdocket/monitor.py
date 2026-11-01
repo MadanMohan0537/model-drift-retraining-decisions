@@ -1,11 +1,18 @@
 """Dependency-free drift statistics and decision policy."""
 from __future__ import annotations
 from dataclasses import dataclass
+import hashlib
+import json
 from math import log, sqrt
+from random import Random
 from statistics import mean
 from typing import Iterable
 
 EPS = 1e-6
+
+def _reference_fingerprint(batch: "Batch") -> str:
+    payload={"features":batch.features,"rows":len(batch.predictions)}
+    return hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(",",":")).encode()).hexdigest()
 
 def _edges(values: list[float], bins: int) -> list[float]:
     ordered = sorted(values)
@@ -53,6 +60,76 @@ class TicketPolicy:
     engineer_hours: float = 3.0
     hourly_engineer_cost: float = 80.0
 
+    def __post_init__(self) -> None:
+        if not 0 <= self.psi_warning or not 0 <= self.ks_warning <= 1:
+            raise ValueError("drift thresholds must be non-negative and KS cannot exceed 1")
+        if not 0 <= self.mae_drop or self.min_mature_labels < 1 or self.maturity_days < 0:
+            raise ValueError("performance thresholds and maturity requirements are invalid")
+        if min(self.training_hours,self.hourly_compute_cost,self.engineer_hours,self.hourly_engineer_cost) < 0:
+            raise ValueError("cost inputs cannot be negative")
+
+@dataclass(frozen=True)
+class AlarmBudget:
+    reference_fingerprint: str
+    monthly_budget: float
+    psi_threshold: float
+    ks_threshold: float
+    calibration_draws: int
+    calibration_windows: int
+    block_size: int
+    calibration_alarm_rate: float
+
+def calibrate_false_alarm_budget(
+    reference: Batch,
+    stable_history: list[Batch],
+    monthly_budget: float = .10,
+    draws: int = 500,
+    block_size: int = 3,
+    seed: int = 13,
+) -> AlarmBudget:
+    """Calibrate joint monthly PSI/KS warnings with moving-block resampling."""
+    if not 0 < monthly_budget < 1:
+        raise ValueError("monthly_budget must be between 0 and 1")
+    if draws < 100:
+        raise ValueError("draws must be at least 100")
+    if len(stable_history) < 20:
+        raise ValueError("at least 20 stable historical windows are required")
+    if not 1 <= block_size <= len(stable_history):
+        raise ValueError("block_size must fit the stable history")
+    if any(set(batch.features)!=set(reference.features) for batch in stable_history):
+        raise ValueError("stable history feature schema mismatch")
+    psi_maxima=[
+        max(psi(reference.features[name],batch.features[name]) for name in reference.features)
+        for batch in stable_history
+    ]
+    ks_maxima=[
+        max(ks(reference.features[name],batch.features[name]) for name in reference.features)
+        for batch in stable_history
+    ]
+    # Split the family budget across PSI and KS (Bonferroni). Moving blocks
+    # preserve short-range correlation between adjacent monthly windows.
+    tail=monthly_budget/2
+    window_count=len(stable_history)
+    quantile_index=min(window_count-1,int((1-tail)*window_count))
+    rng=Random(seed); psi_quantiles=[]; ks_quantiles=[]
+    for _ in range(draws):
+        indices=[]
+        while len(indices)<window_count:
+            start=rng.randrange(window_count)
+            indices.extend((start+offset)%window_count for offset in range(block_size))
+        indices=indices[:window_count]
+        psi_quantiles.append(sorted(psi_maxima[i] for i in indices)[quantile_index])
+        ks_quantiles.append(sorted(ks_maxima[i] for i in indices)[quantile_index])
+    # A 95th-percentile bootstrap quantile is intentionally conservative.
+    confidence_index=min(draws-1,int(.95*draws))
+    psi_threshold=sorted(psi_quantiles)[confidence_index]+1e-12
+    ks_threshold=sorted(ks_quantiles)[confidence_index]+1e-12
+    rate=mean(p>=psi_threshold or k>=ks_threshold for p,k in zip(psi_maxima,ks_maxima))
+    return AlarmBudget(
+        _reference_fingerprint(reference),monthly_budget,psi_threshold,ks_threshold,
+        draws,window_count,block_size,round(rate,6),
+    )
+
 @dataclass(frozen=True)
 class Finding:
     feature: str
@@ -81,8 +158,16 @@ class Decision:
                 f"**Rationale:** {self.reason}\n\n**Estimated retraining cost:** ${self.estimated_cost:.2f}\n")
 
 class DriftMonitor:
-    def __init__(self, reference: Batch, policy: TicketPolicy = TicketPolicy()) -> None:
+    def __init__(
+        self,
+        reference: Batch,
+        policy: TicketPolicy = TicketPolicy(),
+        alarm_budget: AlarmBudget | None = None,
+    ) -> None:
         self.reference, self.policy = reference, policy
+        if alarm_budget is not None and alarm_budget.reference_fingerprint != _reference_fingerprint(reference):
+            raise ValueError("alarm budget was calibrated for a different reference")
+        self.alarm_budget=alarm_budget
         mature = self._mature_pairs(reference)
         if len(mature) < policy.min_mature_labels: raise ValueError("reference lacks mature labels")
         self.baseline_mae = mean(abs(p-o) for p,o in mature)
@@ -95,7 +180,9 @@ class DriftMonitor:
         if set(batch.features) != set(self.reference.features): raise ValueError("feature schema mismatch")
         findings=tuple(sorted((Finding(name,psi(self.reference.features[name], vals),ks(self.reference.features[name], vals))
                                for name,vals in batch.features.items()), key=lambda x:max(x.psi,x.ks), reverse=True))
-        moved=tuple(f for f in findings if f.psi>=self.policy.psi_warning or f.ks>=self.policy.ks_warning)
+        psi_threshold=self.alarm_budget.psi_threshold if self.alarm_budget else self.policy.psi_warning
+        ks_threshold=self.alarm_budget.ks_threshold if self.alarm_budget else self.policy.ks_warning
+        moved=tuple(f for f in findings if f.psi>=psi_threshold or f.ks>=ks_threshold)
         mature=self._mature_pairs(batch)
         labelled=sum(o is not None for o in batch.outcomes)
         current_mae=mean(abs(p-o) for p,o in mature) if mature else None
@@ -121,3 +208,4 @@ def alert_lead_month(decisions: Iterable[Decision]) -> int | None:
     warning=next((i for i,d in enumerate(rows) if d.findings),None)
     decay=next((i for i,d in enumerate(rows) if d.action=="OPEN_RETRAIN_TICKET"),None)
     return None if warning is None or decay is None else decay-warning
+

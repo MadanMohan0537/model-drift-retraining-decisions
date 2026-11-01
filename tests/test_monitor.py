@@ -1,10 +1,13 @@
 import unittest
 from dataclasses import replace
 from driftdocket.fixtures import month, year
-from driftdocket.monitor import Batch, DriftMonitor, TicketPolicy, alert_lead_month, ks, psi
+from driftdocket.monitor import Batch, DriftMonitor, TicketPolicy, alert_lead_month, calibrate_false_alarm_budget, ks, psi
 
 class MonitorTests(unittest.TestCase):
-    def setUp(self): self.ref=month(1,"ref"); self.monitor=DriftMonitor(self.ref)
+    def setUp(self):
+        self.ref=month(1,"ref")
+        self.history=[month(100+i,f"history-{i}") for i in range(60)]
+        self.monitor=DriftMonitor(self.ref)
     def test_psi_same_zero(self): self.assertAlmostEqual(psi([1,2,3]*20,[1,2,3]*20),0)
     def test_psi_detects_shift(self): self.assertGreater(psi(list(range(100)),list(range(100,200))),.2)
     def test_ks_same_zero(self): self.assertEqual(ks([1,2,3],[1,2,3]),0)
@@ -42,4 +45,39 @@ class MonitorTests(unittest.TestCase):
     def test_no_lead_without_warning(self):
         self.assertIsNone(alert_lead_month([self.monitor.analyze(month(2,"x"))]))
 
+    def test_alarm_budget_is_deterministic(self):
+        self.assertEqual(calibrate_false_alarm_budget(self.ref,self.history),calibrate_false_alarm_budget(self.ref,self.history))
+
+    def test_calibration_respects_declared_budget(self):
+        budget=calibrate_false_alarm_budget(self.ref,self.history,monthly_budget=.10)
+        self.assertLessEqual(budget.calibration_alarm_rate,budget.monthly_budget)
+        self.assertEqual(500,budget.calibration_draws)
+
+    def test_budget_rejects_different_reference(self):
+        budget=calibrate_false_alarm_budget(self.ref,self.history)
+        with self.assertRaises(ValueError): DriftMonitor(month(2,"other"),alarm_budget=budget)
+
+    def test_calibrated_monitor_detects_seeded_shift(self):
+        budget=calibrate_false_alarm_budget(self.ref,self.history)
+        monitor=DriftMonitor(self.ref,alarm_budget=budget)
+        self.assertTrue(monitor.analyze(month(2,"shift",shift=6)).findings)
+
+    def test_budget_parameters_are_validated(self):
+        with self.assertRaises(ValueError): calibrate_false_alarm_budget(self.ref,self.history,monthly_budget=0)
+        with self.assertRaises(ValueError): calibrate_false_alarm_budget(self.ref,self.history,draws=99)
+        with self.assertRaises(ValueError): calibrate_false_alarm_budget(self.ref,self.history,block_size=61)
+        with self.assertRaises(ValueError): calibrate_false_alarm_budget(self.ref,self.history[:19])
+
+    def test_policy_parameters_are_validated(self):
+        with self.assertRaises(ValueError): TicketPolicy(ks_warning=1.1)
+        with self.assertRaises(ValueError): TicketPolicy(min_mature_labels=0)
+        with self.assertRaises(ValueError): TicketPolicy(engineer_hours=-1)
+
+    def test_held_out_stable_windows_stay_near_alarm_budget(self):
+        budget=calibrate_false_alarm_budget(self.ref,self.history,monthly_budget=.10,draws=800)
+        monitor=DriftMonitor(self.ref,alarm_budget=budget)
+        alarms=sum(bool(monitor.analyze(month(500+i,f"stable-{i}")).findings) for i in range(200))
+        self.assertLessEqual(alarms/200,.12)
+
 if __name__=="__main__": unittest.main()
+
